@@ -1,0 +1,13 @@
+{
+  "name": "pair-matcher-bot",
+  "version": "1.0.0", 
+  "description": "Slack bot for pair matching",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.14.0",
+    "@slack/web-api": "^6.9.0"
+  }
+}
