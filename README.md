@@ -31,3 +31,4 @@ Type `/pair-match` in Slack to start the pair matching process.
 ## Admin Users
 
 Add admin users in the format:
+ADMIN_USERS=lheh1167@gmail.com
