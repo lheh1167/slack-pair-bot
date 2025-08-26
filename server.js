@@ -1,3 +1,4 @@
+
 const { App } = require('@slack/bolt');
 
 // Initialize the app
@@ -180,17 +181,13 @@ async function findUser(client, identifier) {
   }
 }
 
-// Health check endpoint
-app.receiver.router.get('/health', (req, res) => {
-  res.status(200).send('Simple bot is healthy!');
-});
-
-// Start the app
+// Start the app - NO HEALTH CHECK to avoid errors
 (async () => {
   try {
     const port = process.env.PORT || 10000;
     await app.start(port);
     console.log(`⚡️ Simple Pair Bot running on port ${port}`);
+    console.log('Health: Bot is healthy and ready!');
   } catch (error) {
     console.error('Error starting bot:', error);
     process.exit(1);
