@@ -1,5 +1,4 @@
 const { App } = require('@slack/bolt');
-const { WebClient } = require('@slack/web-api');
 
 // Initialize your app with your bot token and signing secret
 const app = new App({
@@ -438,15 +437,15 @@ class PairMatchingBot {
 // Initialize the bot
 const pairBot = new PairMatchingBot(app);
 
-// Health check endpoint for Render
-app.express.get('/health', (req, res) => {
+// Health check endpoint for Render - FIXED VERSION
+app.receiver.router.get('/health', (req, res) => {
   res.status(200).send('Bot is healthy!');
 });
 
 // Start the app
 (async () => {
   try {
-    const port = process.env.PORT || 3000;
+    const port = process.env.PORT || 10000;
     await app.start(port);
     console.log(`⚡️ Pair Matching Bot is running on port ${port}!`);
   } catch (error) {
