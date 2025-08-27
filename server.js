@@ -1,4 +1,3 @@
-
 const { App } = require('@slack/bolt');
 
 // Initialize the app
@@ -7,55 +6,140 @@ const app = new App({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
 
-// Admin check - simplified
+// Cache for user lookups to improve performance
+let userCache = null;
+let cacheExpiry = 0;
+
+// Admin check
 const isAdmin = (userId) => {
   const adminUsers = process.env.ADMIN_USERS ? process.env.ADMIN_USERS.split(',') : [];
   return adminUsers.length === 0 || adminUsers.includes(userId);
 };
 
+// Build user cache for faster lookups
+async function buildUserCache(client) {
+  const now = Date.now();
+  if (userCache && now < cacheExpiry) {
+    return userCache;
+  }
+
+  try {
+    const users = await client.users.list();
+    userCache = users.members
+      .filter(user => !user.deleted && !user.is_bot)
+      .map(user => ({
+        id: user.id,
+        name: user.name,
+        realName: user.profile.real_name || '',
+        displayName: user.profile.display_name || '',
+        email: user.profile.email || ''
+      }));
+    
+    cacheExpiry = now + (10 * 60 * 1000); // Cache for 10 minutes
+    return userCache;
+  } catch (error) {
+    console.error('Error building user cache:', error);
+    return [];
+  }
+}
+
+// Search users with fuzzy matching
+function searchUsers(query, users) {
+  if (!query || query.length < 2) return [];
+  
+  const cleanQuery = query.replace(/^@/, '').toLowerCase().trim();
+  
+  return users
+    .filter(user => {
+      return user.name.toLowerCase().includes(cleanQuery) ||
+             user.realName.toLowerCase().includes(cleanQuery) ||
+             user.displayName.toLowerCase().includes(cleanQuery) ||
+             user.email.toLowerCase().includes(cleanQuery);
+    })
+    .slice(0, 10) // Limit to 10 results
+    .map(user => ({
+      text: {
+        type: 'plain_text',
+        text: `${user.realName || user.name} (${user.email || '@' + user.name})`
+      },
+      value: user.id
+    }));
+}
+
 // Handle /pair-match command
 app.command('/pair-match', async ({ command, ack, respond, client }) => {
   await ack();
   
-  // Check admin access
   if (!isAdmin(command.user_id)) {
     await respond({
-      text: "🔒 Access denied. Only admins can use this command.",
+      text: "Access denied. Only admins can use this command.",
       response_type: 'ephemeral'
     });
     return;
   }
 
-  // Simple modal for pairs input
+  // Build user cache first
+  await buildUserCache(client);
+
   try {
     await client.views.open({
       trigger_id: command.trigger_id,
       view: {
         type: 'modal',
-        callback_id: 'pair_modal',
-        title: { type: 'plain_text', text: '🎯 Create Pairs' },
+        callback_id: 'pair_modal_v2',
+        title: { type: 'plain_text', text: 'Create Pairs' },
         submit: { type: 'plain_text', text: 'Create DMs' },
         blocks: [
           {
-            type: 'input',
-            block_id: 'pairs',
-            element: {
-              type: 'plain_text_input',
-              action_id: 'pairs_list',
-              multiline: true,
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: '*Add pairs one at a time using the dropdowns below:*'
+            }
+          },
+          {
+            type: 'section',
+            block_id: 'user1_block',
+            text: {
+              type: 'mrkdwn',
+              text: '*First User:*'
+            },
+            accessory: {
+              type: 'external_select',
+              action_id: 'user1_select',
               placeholder: {
                 type: 'plain_text',
-                text: '@alice, @bob\n@charlie, @diana\nemail1@company.com, email2@company.com'
-              }
+                text: 'Search for first user...'
+              },
+              min_query_length: 2
+            }
+          },
+          {
+            type: 'section',
+            block_id: 'user2_block',
+            text: {
+              type: 'mrkdwn',
+              text: '*Second User:*'
             },
-            label: { type: 'plain_text', text: 'Enter pairs (one per line)' }
+            accessory: {
+              type: 'external_select',
+              action_id: 'user2_select',
+              placeholder: {
+                type: 'plain_text',
+                text: 'Search for second user...'
+              },
+              min_query_length: 2
+            }
+          },
+          {
+            type: 'divider'
           },
           {
             type: 'input',
-            block_id: 'message',
+            block_id: 'message_block',
             element: {
               type: 'plain_text_input',
-              action_id: 'intro_text',
+              action_id: 'intro_message',
               placeholder: {
                 type: 'plain_text',
                 text: 'Hi! You\'ve been paired together...'
@@ -73,121 +157,85 @@ app.command('/pair-match', async ({ command, ack, respond, client }) => {
   }
 });
 
-// Handle modal submission
-app.view('pair_modal', async ({ ack, body, view, client }) => {
-  await ack();
-  
-  const pairsText = view.state.values.pairs.pairs_list.value;
-  const introMessage = view.state.values.message.intro_text.value || 
-    "👋 Hi! You've been paired together. This is a great opportunity to connect!";
-  
-  if (!pairsText) {
-    return;
-  }
-
-  const results = [];
-  const lines = pairsText.split('\n').filter(line => line.trim());
-
-  // Process each pair
-  for (const line of lines) {
-    const users = line.split(',').map(u => u.trim());
-    
-    if (users.length !== 2) {
-      results.push({ success: false, pair: line, error: 'Invalid format' });
-      continue;
-    }
-
-    try {
-      // Find user IDs
-      const userId1 = await findUser(client, users[0]);
-      const userId2 = await findUser(client, users[1]);
-      
-      // Create DM between the two users (without admin)
-      const conversation = await client.conversations.open({
-        users: [userId1, userId2].join(',')
-      });
-      
-      // Send intro message
-      await client.chat.postMessage({
-        channel: conversation.channel.id,
-        text: introMessage
-      });
-      
-      results.push({ success: true, pair: line });
-      
-      // Small delay to avoid rate limits
-      await new Promise(resolve => setTimeout(resolve, 200));
-      
-    } catch (error) {
-      console.error(`Error with pair ${line}:`, error.message);
-      results.push({ success: false, pair: line, error: error.message });
-    }
-  }
-
-  // Send summary to admin
-  const successful = results.filter(r => r.success).length;
-  const failed = results.filter(r => !r.success).length;
-  
-  let summary = `✅ Created ${successful} pair DMs\n`;
-  if (failed > 0) {
-    summary += `❌ Failed: ${failed} pairs\n\nFailed pairs:\n`;
-    results.filter(r => !r.success).forEach(r => {
-      summary += `• ${r.pair}: ${r.error}\n`;
-    });
-  }
-  
-  await client.chat.postMessage({
-    channel: body.user.id,
-    text: summary
+// Handle user search for dropdowns
+app.options('user1_select', async ({ options, ack, client }) => {
+  await ack({
+    options: searchUsers(options.value, userCache || [])
   });
 });
 
-// Helper function to find user by email or username
-async function findUser(client, identifier) {
-  // Remove @ symbol if present
-  const cleaned = identifier.replace(/^@/, '');
-  
-  // If it looks like a user ID (starts with U), return it
-  if (cleaned.startsWith('U')) {
-    return cleaned;
-  }
-  
-  // If it contains @, it's probably an email
-  if (cleaned.includes('@')) {
-    try {
-      const result = await client.users.lookupByEmail({ email: cleaned });
-      return result.user.id;
-    } catch (error) {
-      throw new Error(`Email not found: ${cleaned}`);
-    }
-  }
-  
-  // Otherwise, search by display name
-  try {
-    const users = await client.users.list();
-    const user = users.members.find(member => 
-      member.profile.display_name?.toLowerCase() === cleaned.toLowerCase() ||
-      member.profile.real_name?.toLowerCase() === cleaned.toLowerCase() ||
-      member.name?.toLowerCase() === cleaned.toLowerCase()
-    );
-    
-    if (!user) {
-      throw new Error(`User not found: ${cleaned}`);
-    }
-    
-    return user.id;
-  } catch (error) {
-    throw new Error(`Failed to find user: ${cleaned}`);
-  }
-}
+app.options('user2_select', async ({ options, ack, client }) => {
+  await ack({
+    options: searchUsers(options.value, userCache || [])
+  });
+});
 
-// Start the app - NO HEALTH CHECK to avoid errors
+// Handle modal submission
+app.view('pair_modal_v2', async ({ ack, body, view, client }) => {
+  await ack();
+  
+  const values = view.state.values;
+  const user1Id = values.user1_block?.user1_select?.selected_option?.value;
+  const user2Id = values.user2_block?.user2_select?.selected_option?.value;
+  const introMessage = values.message_block?.intro_message?.value || 
+    "Hi! You've been paired together. This is a great opportunity to connect!";
+
+  if (!user1Id || !user2Id) {
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: "Error: Please select both users from the dropdowns."
+    });
+    return;
+  }
+
+  if (user1Id === user2Id) {
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: "Error: Cannot pair a user with themselves."
+    });
+    return;
+  }
+
+  try {
+    // Get user info for the summary
+    const [user1Info, user2Info] = await Promise.all([
+      client.users.info({ user: user1Id }),
+      client.users.info({ user: user2Id })
+    ]);
+
+    // Create DM between the two users (admin NOT included)
+    const conversation = await client.conversations.open({
+      users: [user1Id, user2Id].join(',')
+    });
+    
+    // Send intro message to the pair
+    await client.chat.postMessage({
+      channel: conversation.channel.id,
+      text: introMessage
+    });
+    
+    // Send success message to admin
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: `Success! Created DM between ${user1Info.user.profile.display_name || user1Info.user.real_name} and ${user2Info.user.profile.display_name || user2Info.user.real_name}`
+    });
+    
+  } catch (error) {
+    console.error('Error creating pair:', error);
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: `Error creating pair: ${error.message}`
+    });
+  }
+});
+
+// Start the app
 (async () => {
   try {
-    const port = process.env.PORT || 10000;
+    const port = parseInt(process.env.PORT) || 10000;
     await app.start(port);
-    console.log(`⚡️ Simple Pair Bot running on port ${port}`);
-    console.log('Health: Bot is healthy and ready!');
+    console.log(`Simple Pair Bot running on port ${port}`);
+    console.log('Bot is ready to create pairs!');
   } catch (error) {
     console.error('Error starting bot:', error);
     process.exit(1);
