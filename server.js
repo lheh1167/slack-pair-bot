@@ -286,13 +286,12 @@ app.view('upload_pairs_modal', async ({ ack, body, view, client }) => {
           type: 'button',
           text: {
             type: 'plain_text',
-            text: `Create ${validPairs.length} Valid Pairs`
+            text: `Customize Message & Create ${validPairs.length} Pairs`
           },
           value: JSON.stringify({
-            pairs: validPairs,
-            introMessage: "Hi! You've been paired together. This is a great opportunity to connect!"
+            pairs: validPairs
           }),
-          action_id: 'create_validated_pairs',
+          action_id: 'customize_message',
           style: 'primary'
         }
       ]
@@ -365,17 +364,74 @@ app.action('edit_pairs', async ({ ack, body, client }) => {
   }
 });
 
-// Handle "Create Valid Pairs" button
-app.action('create_validated_pairs', async ({ ack, body, client }) => {
+// Handle "Customize Message & Create Pairs" button
+app.action('customize_message', async ({ ack, body, client }) => {
   await ack();
   
   const data = JSON.parse(body.actions[0].value);
   const validPairs = data.pairs;
-  const introMessage = data.introMessage;
+  
+  try {
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'customize_message_modal',
+        title: { type: 'plain_text', text: 'Customize Message' },
+        submit: { type: 'plain_text', text: `Create ${validPairs.length} Pairs` },
+        private_metadata: JSON.stringify({ pairs: validPairs }),
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Ready to create ${validPairs.length} pair DMs*\n\nCustomize the introduction message below:`
+            }
+          },
+          {
+            type: 'input',
+            block_id: 'custom_message',
+            element: {
+              type: 'plain_text_input',
+              action_id: 'intro_text',
+              multiline: true,
+              initial_value: "Hi! You've been paired together. This is a great opportunity to connect and collaborate!",
+              placeholder: {
+                type: 'plain_text',
+                text: 'Write your custom introduction message...'
+              }
+            },
+            label: { type: 'plain_text', text: 'Introduction Message' }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: '*Tip:* You can use variables in your message:\n• `{user1}` - mentions first user\n• `{user2}` - mentions second user\n• `{name1}` - first user\'s name\n• `{name2}` - second user\'s name'
+            }
+          }
+        ]
+      }
+    });
+  } catch (error) {
+    console.error('Error opening customize modal:', error);
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: "Error opening message customization. Please try again."
+    });
+  }
+});
+
+// Handle message customization submission
+app.view('customize_message_modal', async ({ ack, body, view, client }) => {
+  await ack();
+  
+  const validPairs = JSON.parse(view.private_metadata).pairs;
+  const customMessage = view.state.values.custom_message.intro_text.value;
   
   const results = [];
   
-  // Create DMs for valid pairs
+  // Create DMs for valid pairs with custom message
   for (const pair of validPairs) {
     try {
       // Create DM between the two users (admin NOT included)
@@ -383,10 +439,23 @@ app.action('create_validated_pairs', async ({ ack, body, client }) => {
         users: [pair.user1.found.id, pair.user2.found.id].join(',')
       });
       
+      // Personalize the message
+      let personalizedMessage = customMessage;
+      if (customMessage.includes('{user1}') || customMessage.includes('{user2}')) {
+        personalizedMessage = personalizedMessage
+          .replace(/\{user1\}/g, `<@${pair.user1.found.id}>`)
+          .replace(/\{user2\}/g, `<@${pair.user2.found.id}>`);
+      }
+      if (customMessage.includes('{name1}') || customMessage.includes('{name2}')) {
+        personalizedMessage = personalizedMessage
+          .replace(/\{name1\}/g, pair.user1.found.realName || pair.user1.found.name)
+          .replace(/\{name2\}/g, pair.user2.found.realName || pair.user2.found.name);
+      }
+      
       // Send intro message
       await client.chat.postMessage({
         channel: conversation.channel.id,
-        text: introMessage
+        text: personalizedMessage
       });
       
       results.push({
